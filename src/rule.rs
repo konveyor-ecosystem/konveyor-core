@@ -74,11 +74,11 @@ pub enum KonveyorCondition {
         dependency: FrontendDependencyFields,
     },
     JavaReferenced {
-        #[serde(rename = "java.referenced")]
+        #[serde(rename = "javav2.referenced", alias = "java.referenced")]
         referenced: JavaReferencedFields,
     },
     JavaDependency {
-        #[serde(rename = "java.dependency")]
+        #[serde(rename = "javav2.dependency", alias = "java.dependency")]
         dependency: JavaDependencyFields,
     },
     Or {
@@ -215,41 +215,77 @@ pub struct FrontendReferencedFields {
 
 /// Fields for a `java.referenced` condition.
 ///
-/// Uses the Konveyor Java provider (Eclipse JDTLS under the hood) for
-/// AST-level symbol matching with source code location discriminators.
-#[derive(Debug, Serialize, Deserialize)]
+/// All string fields accept standard regex patterns. The `scope` field
+/// determines WHAT to search for (imports, type references, method calls,
+/// etc.). All other fields act as composable filters that narrow results.
+///
+/// Requires a java-analyzer-provider gRPC server backed by the
+/// `java-indexer` (tree-sitter-based AST indexing).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JavaReferencedFields {
-    /// Regex pattern for the fully-qualified symbol (e.g., `org.springframework.boot.autoconfigure.cache*`).
+    /// Regex pattern for the fully-qualified symbol name.
+    /// e.g., `"org\\.springframework\\.boot\\.autoconfigure\\.cache\\..*"`
     pub pattern: String,
-    /// Source code location to search. One of: IMPORT, PACKAGE, TYPE,
-    /// ANNOTATION, METHOD_CALL, CONSTRUCTOR_CALL, INHERITANCE,
-    /// IMPLEMENTS_TYPE, ENUM_CONSTANT, RETURN_TYPE, VARIABLE_DECLARATION,
-    /// FIELD, METHOD, CLASS.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub location: Option<String>,
-    /// Additional annotation inspection filter.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub annotated: Option<JavaAnnotatedFields>,
-}
 
-/// Annotation inspection sub-condition for `java.referenced`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct JavaAnnotatedFields {
-    /// Regex pattern for the annotation's fully-qualified name.
+    /// Search scope: narrows WHERE to look. One of:
+    ///   IMPORT, TYPE, METHOD_CALL, CONSTRUCTOR_CALL, ANNOTATION, DEFINITION.
+    /// When absent, searches all scopes.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub pattern: Option<String>,
-    /// Annotation element constraints.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub elements: Vec<JavaAnnotationElement>,
-}
+    pub scope: Option<String>,
 
-/// An annotation element constraint for `annotated`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct JavaAnnotationElement {
-    /// Exact element name.
-    pub name: String,
-    /// Regex to match the element value.
-    pub value: String,
+    /// Filter: only match symbols imported from / belonging to this
+    /// package (regex on FQN). e.g., `"org\\.springframework\\..*"`
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub from: Option<String>,
+
+    /// Filter: only match symbols on/in types that extend this class
+    /// (regex on FQN). For DEFINITION scope the matched type's own parent
+    /// is checked; for usage scopes the target symbol's enclosing type's
+    /// parent is checked.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub extends: Option<String>,
+
+    /// Filter: only match symbols on/in types that implement this
+    /// interface (regex on FQN).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub implements: Option<String>,
+
+    /// Filter: only match symbols annotated with this annotation
+    /// (regex on annotation FQN). Simple regex replacement for the
+    /// previous `JavaAnnotatedFields` sub-condition.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub annotated: Option<String>,
+
+    /// Filter: symbol kind — class, interface, record, enum, method,
+    /// field, constructor, enum_member. Primarily narrows DEFINITION scope.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub kind: Option<String>,
+
+    /// Filter: method return type (regex on type name/FQN).
+    /// Only applies to method-related matches.
+    #[serde(
+        rename = "returnType",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub return_type: Option<String>,
+
+    /// Filter: method parameter type (regex on type name/FQN).
+    /// Matches if ANY parameter type matches the pattern.
+    #[serde(
+        rename = "parameterType",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub parameter_type: Option<String>,
+
+    /// File path regex filter. Only scan files whose path matches.
+    #[serde(
+        rename = "filePattern",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub file_pattern: Option<String>,
 }
 
 /// Fields for a `java.dependency` condition.

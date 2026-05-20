@@ -13,75 +13,21 @@ use anyhow::{Context, Result};
 
 // ── Fix guidance types ──────────────────────────────────────────────────
 
-/// How to fix a detected issue.
+/// Top-level fix guidance document written to `fix-guidance.yaml`.
 ///
-/// Mirrors the frontend-analyzer-provider's fix engine: each rule is mapped
-/// to a deterministic fix strategy with confidence level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FixGuidanceEntry {
-    /// The rule ID this fix corresponds to.
-    #[serde(rename = "ruleID")]
-    pub rule_id: String,
-
-    /// The fix strategy to apply.
-    pub strategy: FixStrategyKind,
-
-    /// How confident we are this fix is correct.
-    pub confidence: FixConfidence,
-
-    /// Where this fix guidance came from.
-    pub source: FixSource,
-
-    /// The affected symbol.
-    pub symbol: String,
-
-    /// Source file where the breaking change originates.
-    pub file: String,
-
-    /// Concrete instructions for fixing the issue.
-    pub fix_description: String,
-
-    /// Example of the old code pattern (when available).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub before: Option<String>,
-
-    /// Example of the new code pattern (when available).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub after: Option<String>,
-
-    /// Search pattern to find code that needs fixing.
-    pub search_pattern: String,
-
-    /// Suggested replacement (for mechanical fixes).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub replacement: Option<String>,
+/// Contains only summary statistics derived from fix strategies.
+/// Per-rule fix details are in `fix-strategies.json` (key-based, correct).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FixGuidanceDoc {
+    /// Version range this guidance applies to.
+    pub migration: MigrationInfo,
+    /// Summary statistics.
+    pub summary: FixSummary,
 }
 
-/// What kind of fix to apply (classification label).
+/// How confident a fix is.
 ///
-/// This is a classification enum used in fix guidance documents.
-/// It is distinct from the runtime `FixStrategy` in the fix engine,
-/// which carries data payloads for each variant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FixStrategyKind {
-    /// Find-and-replace: rename old symbol to new symbol.
-    Rename,
-    /// Update function call sites to match new signature.
-    UpdateSignature,
-    /// Update type annotations to match new types.
-    UpdateType,
-    /// Remove usages of a deleted symbol and find alternatives.
-    FindAlternative,
-    /// Update import paths or module system (require <-> import).
-    UpdateImport,
-    /// Ensure package.json has the correct dependency (add if missing, update if present).
-    EnsureDependency,
-    /// Requires manual review -- behavioral change or complex refactor.
-    ManualReview,
-}
-
-/// How confident the fix guidance is.
+/// Used by the fix-engine's `PlannedFix` to classify applied fixes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FixConfidence {
@@ -95,7 +41,9 @@ pub enum FixConfidence {
     Low,
 }
 
-/// Where the fix guidance originates.
+/// Where a fix originates.
+///
+/// Used by the fix-engine's `PlannedFix` to classify fix provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FixSource {
@@ -105,17 +53,6 @@ pub enum FixSource {
     Llm,
     /// Flagged for manual intervention.
     Manual,
-}
-
-/// Top-level fix guidance document written to `fix-guidance.yaml`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FixGuidanceDoc {
-    /// Version range this guidance applies to.
-    pub migration: MigrationInfo,
-    /// Summary statistics.
-    pub summary: FixSummary,
-    /// Per-rule fix entries.
-    pub fixes: Vec<FixGuidanceEntry>,
 }
 
 /// Migration metadata.
@@ -200,6 +137,16 @@ pub struct DeprecatedMigrationContext {
     /// Props that exist ONLY on the deprecated component (no v6 equivalent).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub removed_props: Vec<String>,
+    /// Appearance/variant notes inferred from CSS modifier comparison.
+    ///
+    /// When the replacement component has a variant-like prop (e.g., `variant`)
+    /// with union string values, and the deprecated component's CSS modifiers
+    /// suggest a specific default appearance, this field provides guidance.
+    ///
+    /// Example: "Chip has no pf-m-outline modifier (outline is its default
+    /// appearance). Add variant='outline' to Label to preserve visual parity."
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub appearance_notes: Vec<String>,
 }
 
 /// A machine-readable fix strategy entry.
@@ -241,6 +188,13 @@ pub struct FixStrategyEntry {
     /// Dependency update: new version range (e.g., "^6.1.0").
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub new_version: Option<String>,
+    /// Dependency update: old package coordinate for proactive matching.
+    /// When set, the fix engine can search manifest files for this coordinate
+    /// even without kantra incidents (bypassing the kantra dependency dispatch).
+    /// For namespace migrations: the old namespace (e.g., "javax.persistence").
+    /// For coordinate renames: the old group:artifact (e.g., "org.hibernate:hibernate-core").
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub old_package: Option<String>,
 
     // ── Family migration fields ────────────────────────────────────────
     // Used by `FamilyMigration` strategy entries (keyed `family:<Name>`)
@@ -295,6 +249,16 @@ pub struct FixStrategyEntry {
     /// component that has a detected migration target.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub deprecated_migration: Option<DeprecatedMigrationContext>,
+
+    /// The npm package (or equivalent) whose analysis produced this strategy.
+    ///
+    /// Set by the semver-analyzer after strategy generation so the fix-engine
+    /// can group entries by originating package at merge time. For example,
+    /// entries from `@patternfly/react-drag-drop` analysis carry that as
+    /// `source_package`, allowing the fix-engine to connect them with
+    /// `EnsureDependency` rules that target the same package.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source_package: Option<String>,
 
     /// Patterns to exclude from this fix strategy's automated replacement.
     ///
@@ -375,6 +339,24 @@ impl FixStrategyEntry {
         }
     }
 
+    /// Create an EnsureDependency strategy with old_package for proactive matching.
+    ///
+    /// `old_package` is used by the fix engine to search manifest files when
+    /// kantra doesn't produce incidents for dependency conditions.
+    pub fn ensure_dependency_with_old(
+        package: impl Into<String>,
+        new_version: impl Into<String>,
+        old_package: impl Into<String>,
+    ) -> Self {
+        Self {
+            strategy: "EnsureDependency".into(),
+            package: Some(package.into()),
+            new_version: Some(new_version.into()),
+            old_package: Some(old_package.into()),
+            ..Default::default()
+        }
+    }
+
     /// Convert to a MappingEntry (extracting the single mapping).
     pub fn to_mapping(&self) -> MappingEntry {
         MappingEntry {
@@ -383,6 +365,40 @@ impl FixStrategyEntry {
             component: self.component.clone(),
             prop: self.prop.clone(),
         }
+    }
+}
+
+// ── Summary computation ─────────────────────────────────────────────────
+
+/// Compute fix summary counts from the final strategies map.
+///
+/// Categorizes each strategy by type:
+/// - **auto_fixable**: deterministic codemods (Rename, CssVariablePrefix,
+///   RemoveProp, ImportPathChange, EnsureDependency, PropValueChange)
+/// - **needs_review**: partially automated or LLM-assisted fixes
+///   (LlmAssisted, FamilyMigration, PropTypeChange, AnnotationParamRewrite)
+/// - **manual_only**: everything else (Manual, unknown strategy types)
+pub fn compute_fix_summary(strategies: &HashMap<String, FixStrategyEntry>) -> FixSummary {
+    let total_fixes = strategies.len();
+    let mut auto_fixable = 0usize;
+    let mut needs_review = 0usize;
+    let mut manual_only = 0usize;
+
+    for entry in strategies.values() {
+        match entry.strategy.as_str() {
+            "Rename" | "CssVariablePrefix" | "RemoveProp" | "ImportPathChange"
+            | "EnsureDependency" | "PropValueChange" => auto_fixable += 1,
+            "LlmAssisted" | "FamilyMigration" | "PropTypeChange"
+            | "AnnotationParamRewrite" => needs_review += 1,
+            _ => manual_only += 1,
+        }
+    }
+
+    FixSummary {
+        total_fixes,
+        auto_fixable,
+        needs_review,
+        manual_only,
     }
 }
 
@@ -420,6 +436,7 @@ pub fn strategy_priority(strategy: &str) -> u8 {
         "Rename" => 5,
         "RemoveProp" => 4,
         "CssVariablePrefix" => 4,
+        "AnnotationParamRewrite" => 4,
         "ImportPathChange" => 3,
         "PropValueChange" => 2,
         "PropTypeChange" => 2,
